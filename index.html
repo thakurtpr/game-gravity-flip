@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>GRAVITY FLIP</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #ui {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none; font-family: 'Courier New', monospace;
+    color: #fff; user-select: none; -webkit-user-select: none;
+  }
+  #score-display {
+    position: absolute; top: 20px; right: 30px;
+    font-size: 24px; letter-spacing: 2px; text-shadow: 0 0 10px #0ff, 0 0 20px #0ff;
+    opacity: 0; transition: opacity 0.3s;
+  }
+  #score-display.visible { opacity: 1; }
+  #score-display .label { font-size: 12px; color: #888; }
+  #high-score-hud {
+    position: absolute; top: 52px; right: 30px;
+    font-size: 14px; color: #f0f; letter-spacing: 1px;
+    text-shadow: 0 0 8px #f0f; opacity: 0; transition: opacity 0.3s;
+  }
+  #high-score-hud.visible { opacity: 1; }
+  #start-screen, #death-screen {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    transition: opacity 0.5s;
+  }
+  #start-screen h1 {
+    font-size: clamp(36px, 8vw, 72px); letter-spacing: 8px;
+    background: linear-gradient(90deg, #0ff, #f0f, #0ff);
+    background-size: 200% 100%;
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text; animation: shimmer 3s linear infinite;
+    text-shadow: none; margin-bottom: 20px;
+  }
+  @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+  #start-screen .sub {
+    font-size: clamp(14px, 3vw, 20px); color: #888; letter-spacing: 4px; margin-bottom: 40px;
+  }
+  #start-screen .prompt, #death-screen .prompt {
+    font-size: clamp(16px, 3vw, 22px); color: #0ff;
+    text-shadow: 0 0 10px #0ff; animation: pulse 1.5s ease-in-out infinite;
+    pointer-events: auto; cursor: pointer;
+  }
+  @keyframes pulse { 0%,100%{opacity:0.5} 50%{opacity:1} }
+  #death-screen { opacity: 0; pointer-events: none; }
+  #death-screen.visible { opacity: 1; pointer-events: auto; }
+  #death-screen h2 {
+    font-size: clamp(28px, 6vw, 52px); color: #f44; letter-spacing: 4px;
+    text-shadow: 0 0 20px #f44; margin-bottom: 10px;
+  }
+  #death-screen .final-score {
+    font-size: clamp(20px, 4vw, 36px); color: #fff; margin-bottom: 5px;
+  }
+  #death-screen .high-score {
+    font-size: clamp(14px, 2.5vw, 20px); color: #f0f;
+    text-shadow: 0 0 8px #f0f; margin-bottom: 5px;
+  }
+  #death-screen .new-best {
+    font-size: 16px; color: #0f0; text-shadow: 0 0 10px #0f0;
+    margin-bottom: 30px; min-height: 20px;
+  }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <div id="score-display"><span class="label">DISTANCE</span><br><span id="score-value">0</span></div>
+  <div id="high-score-hud">BEST: <span id="high-score-hud-val">0</span></div>
+
+  <div id="start-screen">
+    <h1>GRAVITY FLIP</h1>
+    <div class="sub">INFINITE RUNNER</div>
+    <div class="prompt">[ SPACE / TAP TO START ]</div>
+  </div>
+
+  <div id="death-screen">
+    <h2>WRECKED</h2>
+    <div class="final-score">DISTANCE: <span id="final-score-val">0</span></div>
+    <div class="high-score">BEST: <span id="final-high-val">0</span></div>
+    <div class="new-best" id="new-best-text"></div>
+    <div class="prompt">[ SPACE / TAP TO RESTART ]</div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+
+// ============================================================
+// CONFIG
+// ============================================================
+const CFG = {
+  tunnelRadius: 5,
+  tunnelSegmentLength: 30,
+  tunnelSegmentsAhead: 12,
+  tunnelSegmentsBehind: 3,
+
+  playerRadius: 0.35,
+  playerGlowRadius: 0.55,
+  playerWallOffset: 3.2,
+
+  baseSpeed: 18,
+  maxSpeed: 55,
+  speedRampTime: 180,
+
+  flipDuration: 0.28,
+  flipCooldown: 0.05,
+
+  obstacleStartZ: -80,
+  obstacleMinGap: 12,
+  obstacleMaxGap: 22,
+  obstacleTypes: ['ring', 'wall', 'blade'],
+
+  particleCountFlip: 40,
+  particleCountDeath: 120,
+
+  colors: {
+    bg: 0x050510,
+    tunnel1: 0x1a00ff,
+    tunnel2: 0x8800ff,
+    playerCore: 0xffffff,
+    playerGlow: 0x44ccff,
+    obstacleRing: 0xff00aa,
+    obstacleWall: 0x00ffff,
+    obstacleBlade: 0xff4400,
+    particleFlip: 0x00ffff,
+    particleDeath: 0xff2200,
+  }
+};
+
+// ============================================================
+// STATE
+// ============================================================
+const STATE = {
+  phase: 'start', // start | playing | dead
+  score: 0,
+  highScore: parseInt(localStorage.getItem('gravityFlipHigh') || '0'),
+  speed: CFG.baseSpeed,
+  playTime: 0,
+  gravityDir: 1, // 1 = bottom, -1 = top
+  flipping: false,
+  flipProgress: 0,
+  flipFrom: 1,
+  flipTo: -1,
+  flipCooldownTimer: 0,
+  cameraRoll: 0,
+  cameraRollTarget: 0,
+  tunnelHue: 0.65,
+  distanceTraveled: 0,
+  nextObstacleZ: -60,
+  obstacles: [],
+  tunnelSegments: [],
+  particles: [],
+  shakeAmount: 0,
+  dead: false,
+  deathTimer: 0,
+};
+
+// ============================================================
+// DOM REFS
+// ============================================================
+const DOM = {
+  scoreDisplay: document.getElementById('score-display'),
+  scoreValue: document.getElementById('score-value'),
+  highScoreHud: document.getElementById('high-score-hud'),
+  highScoreHudVal: document.getElementById('high-score-hud-val'),
+  startScreen: document.getElementById('start-screen'),
+  deathScreen: document.getElementById('death-screen'),
+  finalScoreVal: document.getElementById('final-score-val'),
+  finalHighVal: document.getElementById('final-high-val'),
+  newBestText: document.getElementById('new-best-text'),
+};
+
+// ============================================================
+// THREE.JS SETUP
+// ============================================================
+let renderer, scene, camera, clock;
+let playerGroup, playerCore, playerGlowMesh;
+let tunnelGroup, obstacleGroup, particleGroup;
+
+function initThree() {
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.2;
+  document.body.prepend(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(CFG.colors.bg);
+  scene.fog = new THREE.FogExp2(CFG.colors.bg, 0.012);
+
+  camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 300);
+  camera.position.set(0, 0, 8);
+  camera.lookAt(0, 0, -50);
+
+  clock = new THREE.Clock();
+
+  // Ambient light
+  scene.add(new THREE.AmbientLight(0x222244, 0.5));
+
+  // Point light on player
+  const playerLight = new THREE.PointLight(0x44ccff, 2, 20);
+  playerLight.position.set(0, 0, 0);
+  scene.add(playerLight);
+  STATE.playerLight = playerLight;
+
+  // Groups
+  tunnelGroup = new THREE.Group();
+  obstacleGroup = new THREE.Group();
+  particleGroup = new THREE.Group();
+  scene.add(tunnelGroup, obstacleGroup, particleGroup);
+
+  // Player
+  initPlayer();
+
+  // Initial tunnel
+  initTunnel();
+
+  window.addEventListener('resize', onResize);
+}
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+// ============================================================
+// PLAYER
+// ============================================================
+function initPlayer() {
+  playerGroup = new THREE.Group();
+
+  // Core orb
+  const coreGeo = new THREE.SphereGeometry(CFG.playerRadius, 24, 24);
+  const coreMat = new THREE.MeshStandardMaterial({
+    color: CFG.colors.playerCore,
+    emissive: CFG.colors.playerCore,
+    emissiveIntensity: 1.5,
+  });
+  playerCore = new THREE.Mesh(coreGeo, coreMat);
+  playerGroup.add(playerCore);
+
+  // Glow sphere
+  const glowGeo = new THREE.SphereGeometry(CFG.playerGlowRadius, 16, 16);
+  const glowMat = new THREE.MeshBasicMaterial({
+    color: CFG.colors.playerGlow,
+    transparent: true,
+    opacity: 0.25,
+  });
+  playerGlowMesh = new THREE.Mesh(glowGeo, glowMat);
+  playerGroup.add(playerGlowMesh);
+
+  playerGroup.position.set(0, -CFG.playerWallOffset, 0);
+  scene.add(playerGroup);
+}
+
+// ============================================================
+// TUNNEL
+// ============================================================
+function createTunnelSegment(zStart) {
+  const group = new THREE.Group();
+
+  const length = CFG.tunnelSegmentLength;
+  const radius = CFG.tunnelRadius;
+
+  // Tunnel walls — wireframe tube
+  const curve = new THREE.LineCurve3(
+    new THREE.Vector3(0, 0, zStart),
+    new THREE.Vector3(0, 0, zStart - length)
+  );
+  const tubeGeo = new THREE.TubeGeometry(curve, 1, radius, 16, false);
+  const hue = (STATE.tunnelHue + zStart * 0.001) % 1;
+  const color = new THREE.Color().setHSL(hue, 1, 0.3);
+  const tubeMat = new THREE.MeshBasicMaterial({
+    color: color,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.35,
+  });
+  const tube = new THREE.Mesh(tubeGeo, tubeMat);
+  group.add(tube);
+
+  // Edge rings for depth
+  for (let i = 0; i <= 3; i++) {
+    const ringZ = zStart - (length * i / 3);
+    const ringGeo = new THREE.RingGeometry(radius - 0.05, radius + 0.05, 24);
+    const ringColor = new THREE.Color().setHSL((hue + i * 0.05) % 1, 1, 0.5);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: ringColor,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.5,
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.position.set(0, 0, ringZ);
+    group.add(ring);
+  }
+
+  // Floor/ceiling glow lines
+  for (let side of [-1, 1]) {
+    const lineGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-radius * 0.7, side * radius * 0.95, zStart),
+      new THREE.Vector3(-radius * 0.7, side * radius * 0.95, zStart - length),
+    ]);
+    const lineGeo2 = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(radius * 0.7, side * radius * 0.95, zStart),
+      new THREE.Vector3(radius * 0.7, side * radius * 0.95, zStart - length),
+    ]);
+    const lineMat = new THREE.LineBasicMaterial({
+      color: new THREE.Color().setHSL((hue + 0.3) % 1, 1, 0.6),
+      transparent: true,
+      opacity: 0.6,
+    });
+    group.add(new THREE.Line(lineGeo, lineMat));
+    group.add(new THREE.Line(lineGeo2, lineMat));
+  }
+
+  tunnelGroup.add(group);
+  return { group, zStart, zEnd: zStart - length };
+}
+
+function initTunnel() {
+  for (let i = -CFG.tunnelSegmentsBehind; i < CFG.tunnelSegmentsAhead; i++) {
+    const seg = createTunnelSegment(-i * CFG.tunnelSegmentLength);
+    STATE.tunnelSegments.push(seg);
+  }
+}
+
+function updateTunnel(playerZ) {
+  // Remove segments too far behind
+  STATE.tunnelSegments = STATE.tunnelSegments.filter(seg => {
+    if (seg.zStart > playerZ + CFG.tunnelSegmentLength * 2) {
+      tunnelGroup.remove(seg.group);
+      seg.group.traverse(child => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+      });
+      return false;
+    }
+    return true;
+  });
+
+  // Add segments ahead
+  if (STATE.tunnelSegments.length > 0) {
+    const furthest = STATE.tunnelSegments.reduce((a, b) => a.zEnd < b.zEnd ? a : b);
+    const neededZ = playerZ - CFG.tunnelSegmentsAhead * CFG.tunnelSegmentLength;
+    while (furthest.zEnd > neededZ) {
+      const newSeg = createTunnelSegment(furthest.zEnd);
+      STATE.tunnelSegments.push(newSeg);
+      if (newSeg.zEnd < furthest.zEnd) {
+        furthest.zEnd = newSeg.zEnd;
+        furthest.zStart = newSeg.zStart;
+      }
+    }
+  }
+}
+
+// ============================================================
+// OBSTACLES
+// ============================================================
+function createObstacle(z) {
+  const type = CFG.obstacleTypes[Math.floor(Math.random() * CFG.obstacleTypes.length)];
+  const obj = { type, z, alive: true, meshes: [], hitRadius: 0 };
+
+  if (type === 'ring') {
+    // Neon ring that blocks one half (top or bottom)
+    const side = Math.random() < 0.5 ? 1 : -1;
+    const ringGeo = new THREE.TorusGeometry(CFG.tunnelRadius * 0.55, 0.15, 8, 32);
+    const ringMat = new THREE.MeshStandardMaterial({
+      color: CFG.colors.obstacleRing,
+      emissive: CFG.colors.obstacleRing,
+      emissiveIntensity: 1.2,
+      transparent: true,
+      opacity: 0.9,
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.position.set(0, side * 1.5, z);
+    ring.rotation.x = Math.PI * 0.5;
+    obstacleGroup.add(ring);
+    obj.meshes.push(ring);
+    obj.side = side;
+    obj.hitRadius = 2.2;
+    obj.hitType = 'ring';
+  }
+  else if (type === 'wall') {
+    // Wall with a gap on one side
+    const gapSide = Math.random() < 0.5 ? 1 : -1; // gap on top or bottom
+    const wallGeo = new THREE.BoxGeometry(CFG.tunnelRadius * 1.8, CFG.tunnelRadius * 0.9, 0.4);
+    const wallMat = new THREE.MeshStandardMaterial({
+      color: CFG.colors.obstacleWall,
+      emissive: CFG.colors.obstacleWall,
+      emissiveIntensity: 0.8,
+      transparent: true,
+      opacity: 0.85,
+    });
+    const wall = new THREE.Mesh(wallGeo, wallMat);
+    wall.position.set(0, -gapSide * 2.2, z);
+    obstacleGroup.add(wall);
+    obj.meshes.push(wall);
+    obj.gapSide = gapSide;
+    obj.hitType = 'wall';
+
+    // Edge glow lines
+    const edgeGeo = new THREE.EdgesGeometry(wallGeo);
+    const edgeMat = new THREE.LineBasicMaterial({ color: 0x00ffff });
+    const edges = new THREE.LineSegments(edgeGeo, edgeMat);
+    edges.position.copy(wall.position);
+    obstacleGroup.add(edges);
+    obj.meshes.push(edges);
+  }
+  else if (type === 'blade') {
+    // Rotating blade in the center
+    const bladeGeo = new THREE.BoxGeometry(CFG.tunnelRadius * 1.5, 0.25, 0.25);
+    const bladeMat = new THREE.MeshStandardMaterial({
+      color: CFG.colors.obstacleBlade,
+      emissive: CFG.colors.obstacleBlade,
+      emissiveIntensity: 1.5,
+    });
+    const blade = new THREE.Mesh(bladeGeo, bladeMat);
+    blade.position.set(0, 0, z);
+    obstacleGroup.add(blade);
+    obj.meshes.push(blade);
+    obj.hitType = 'blade';
+    obj.rotSpeed = 2 + Math.random() * 3;
+
+    // Second cross blade
+    const blade2 = new THREE.Mesh(bladeGeo.clone(), bladeMat.clone());
+    blade2.position.set(0, 0, z);
+    blade2.rotation.z = Math.PI / 2;
+    obstacleGroup.add(blade2);
+    obj.meshes.push(blade2);
+  }
+
+  return obj;
+}
+
+function spawnObstacles(playerZ) {
+  while (STATE.nextObstacleZ > playerZ - CFG.tunnelSegmentsAhead * CFG.tunnelSegmentLength) {
+    const obs = createObstacle(STATE.nextObstacleZ);
+    STATE.obstacles.push(obs);
+    const speedFactor = Math.min(1, STATE.playTime / CFG.speedRampTime);
+    const gap = THREE.MathUtils.lerp(CFG.obstacleMaxGap, CFG.obstacleMinGap, speedFactor);
+    STATE.nextObstacleZ -= gap;
+  }
+}
+
+function updateObstacles(dt, playerZ) {
+  STATE.obstacles = STATE.obstacles.filter(obs => {
+    if (obs.z > playerZ + 20) {
+      obs.meshes.forEach(m => {
+        obstacleGroup.remove(m);
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) m.material.dispose();
+      });
+      return false;
+    }
+
+    // Rotate blades
+    if (obs.type === 'blade') {
+      obs.meshes.forEach(m => {
+        m.rotation.z += obs.rotSpeed * dt;
+      });
+    }
+
+    return true;
+  });
+}
+
+function checkCollisions(playerPos) {
+  const px = playerPos.x;
+  const py = playerPos.y;
+  const pz = playerPos.z;
+
+  for (const obs of STATE.obstacles) {
+    if (!obs.alive) continue;
+    const dz = Math.abs(obs.z - pz);
+    if (dz > 2) continue;
+
+    if (obs.hitType === 'ring') {
+      // Hit if player on same side as ring
+      if (dz < 1.0) {
+        const playerSide = py > 0 ? 1 : -1;
+        if (playerSide === obs.side) {
+          const dist = Math.sqrt((py - obs.side * 1.5) ** 2);
+          if (dist < 2.0) return true;
+        }
+      }
+    }
+    else if (obs.hitType === 'wall') {
+      if (dz < 0.8) {
+        // Gap is on gapSide. Player must be on gapSide to survive
+        const playerSide = py > 0 ? 1 : -1;
+        if (playerSide !== obs.gapSide) {
+          return true;
+        }
+      }
+    }
+    else if (obs.hitType === 'blade') {
+      if (dz < 0.8) {
+        // Check if player is near center (blades are in center)
+        const distFromCenter = Math.abs(py);
+        if (distFromCenter < 2.5) {
+          // Check blade angle — safe zones exist
+          const blade = obs.meshes[0];
+          const angle = blade.rotation.z % Math.PI;
+          const playerAngle = Math.atan2(py, px);
+          // Simplified — blades are dangerous if close to center
+          if (distFromCenter < 1.8) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// ============================================================
+// PARTICLES
+// ============================================================
+function spawnParticles(position, count, color, speed, life) {
+  for (let i = 0; i < count; i++) {
+    const geo = new THREE.SphereGeometry(0.06 + Math.random() * 0.08, 4, 4);
+    const mat = new THREE.MeshBasicMaterial({
+      color: color,
+      transparent: true,
+      opacity: 1,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(position);
+    particleGroup.add(mesh);
+
+    const vel = new THREE.Vector3(
+      (Math.random() - 0.5) * speed,
+      (Math.random() - 0.5) * speed,
+      (Math.random() - 0.5) * speed
+    );
+
+    STATE.particles.push({
+      mesh,
+      vel,
+      life: life,
+      maxLife: life,
+    });
+  }
+}
+
+function updateParticles(dt) {
+  STATE.particles = STATE.particles.filter(p => {
+    p.life -= dt;
+    if (p.life <= 0) {
+      particleGroup.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      p.mesh.material.dispose();
+      return false;
+    }
+    p.mesh.position.add(p.vel.clone().multiplyScalar(dt));
+    p.vel.multiplyScalar(0.96);
+    p.mesh.material.opacity = p.life / p.maxLife;
+    p.mesh.scale.setScalar(p.life / p.maxLife);
+    return true;
+  });
+}
+
+// ============================================================
+// AUDIO (Web Audio API — no external files)
+// ============================================================
+let audioCtx;
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+function playFlipSound() {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(300, audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(1200, audioCtx.currentTime + 0.08);
+  osc.frequency.exponentialRampToValueAtTime(600, audioCtx.currentTime + 0.15);
+  gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+
+  osc.start(audioCtx.currentTime);
+  osc.stop(audioCtx.currentTime + 0.2);
+
+  // Noise whoosh
+  const bufferSize = audioCtx.sampleRate * 0.15;
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+  }
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+  const noiseGain = audioCtx.createGain();
+  noiseGain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+  noiseGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+  noise.connect(noiseGain);
+  noiseGain.connect(audioCtx.destination);
+  noise.start(audioCtx.currentTime);
+}
+
+function playDeathSound() {
+  if (!audioCtx) return;
+  // Low crunch
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(200, audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(30, audioCtx.currentTime + 0.5);
+  gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+  osc.start(audioCtx.currentTime);
+  osc.stop(audioCtx.currentTime + 0.5);
+
+  // Noise burst
+  const bufferSize = audioCtx.sampleRate * 0.3;
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 2);
+  }
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+  const noiseGain = audioCtx.createGain();
+  noiseGain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+  noiseGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+  noise.connect(noiseGain);
+  noiseGain.connect(audioCtx.destination);
+  noise.start(audioCtx.currentTime);
+
+  // Impact sub
+  const sub = audioCtx.createOscillator();
+  const subGain = audioCtx.createGain();
+  sub.connect(subGain);
+  subGain.connect(audioCtx.destination);
+  sub.type = 'sine';
+  sub.frequency.setValueAtTime(80, audioCtx.currentTime);
+  sub.frequency.exponentialRampToValueAtTime(20, audioCtx.currentTime + 0.4);
+  subGain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+  subGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+  sub.start(audioCtx.currentTime);
+  sub.stop(audioCtx.currentTime + 0.4);
+}
+
+// Background pulse
+let bgPulseOsc, bgPulseGain, bgPulseLfo;
+function startBgPulse() {
+  if (!audioCtx) return;
+  stopBgPulse();
+
+  bgPulseOsc = audioCtx.createOscillator();
+  bgPulseGain = audioCtx.createGain();
+  bgPulseLfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+
+  bgPulseOsc.type = 'sine';
+  bgPulseOsc.frequency.value = 55;
+  bgPulseGain.gain.value = 0;
+
+  bgPulseLfo.type = 'sine';
+  bgPulseLfo.frequency.value = 1.5;
+  lfoGain.gain.value = 0.04;
+
+  bgPulseLfo.connect(lfoGain);
+  lfoGain.connect(bgPulseGain.gain);
+  bgPulseOsc.connect(bgPulseGain);
+  bgPulseGain.connect(audioCtx.destination);
+
+  bgPulseOsc.start();
+  bgPulseLfo.start();
+}
+
+function stopBgPulse() {
+  if (bgPulseOsc) { try { bgPulseOsc.stop(); } catch(e){} bgPulseOsc = null; }
+  if (bgPulseLfo) { try { bgPulseLfo.stop(); } catch(e){} bgPulseLfo = null; }
+}
+
+function updateBgPulse() {
+  if (bgPulseLfo) {
+    const speedFactor = (STATE.speed - CFG.baseSpeed) / (CFG.maxSpeed - CFG.baseSpeed);
+    bgPulseLfo.frequency.value = 1.5 + speedFactor * 3;
+    bgPulseOsc.frequency.value = 55 + speedFactor * 30;
+  }
+}
+
+// ============================================================
+// INPUT
+// ============================================================
+let inputAction = false;
+
+function onInput() {
+  if (STATE.phase === 'start') {
+    startGame();
+    return;
+  }
+  if (STATE.phase === 'dead') {
+    if (STATE.deathTimer > 0.5) {
+      resetGame();
+    }
+    return;
+  }
+  if (STATE.phase === 'playing') {
+    inputAction = true;
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    onInput();
+  }
+});
+
+document.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  onInput();
+}, { passive: false });
+
+document.addEventListener('mousedown', (e) => {
+  // Only for start/death screens on desktop, otherwise space is primary
+  if (STATE.phase !== 'playing') {
+    onInput();
+  }
+});
+
+// ============================================================
+// GAME STATE TRANSITIONS
+// ============================================================
+function startGame() {
+  initAudio();
+  STATE.phase = 'playing';
+  STATE.score = 0;
+  STATE.playTime = 0;
+  STATE.speed = CFG.baseSpeed;
+  STATE.gravityDir = 1;
+  STATE.flipping = false;
+  STATE.flipProgress = 0;
+  STATE.flipCooldownTimer = 0;
+  STATE.cameraRoll = 0;
+  STATE.cameraRollTarget = 0;
+  STATE.distanceTraveled = 0;
+  STATE.dead = false;
+  STATE.deathTimer = 0;
+
+  playerGroup.visible = true;
+  playerGroup.position.set(0, -CFG.playerWallOffset, 0);
+  playerGroup.scale.setScalar(1);
+
+  DOM.startScreen.style.opacity = '0';
+  DOM.startScreen.style.pointerEvents = 'none';
+  DOM.deathScreen.classList.remove('visible');
+  DOM.scoreDisplay.classList.add('visible');
+  DOM.highScoreHud.classList.add('visible');
+  DOM.highScoreHudVal.textContent = STATE.highScore;
+
+  startBgPulse();
+}
+
+function die() {
+  STATE.phase = 'dead';
+  STATE.dead = true;
+  STATE.deathTimer = 0;
+  STATE.shakeAmount = 1;
+
+  // Update high score
+  const isNewBest = STATE.score > STATE.highScore;
+  if (isNewBest) {
+    STATE.highScore = STATE.score;
+    localStorage.setItem('gravityFlipHigh', STATE.highScore.toString());
+  }
+
+  // Death particles
+  spawnParticles(playerGroup.position.clone(), CFG.particleCountDeath, CFG.colors.particleDeath, 8, 1.5);
+  spawnParticles(playerGroup.position.clone(), 30, 0xffffff, 5, 1.0);
+
+  playerGroup.visible = false;
+  playDeathSound();
+  stopBgPulse();
+
+  // Show death screen after delay
+  setTimeout(() => {
+    DOM.finalScoreVal.textContent = STATE.score;
+    DOM.finalHighVal.textContent = STATE.highScore;
+    DOM.newBestText.textContent = isNewBest ? '*** NEW BEST ***' : '';
+    DOM.deathScreen.classList.add('visible');
+  }, 600);
+}
+
+function resetGame() {
+  // Clear obstacles
+  STATE.obstacles.forEach(obs => {
+    obs.meshes.forEach(m => {
+      obstacleGroup.remove(m);
+      if (m.geometry) m.geometry.dispose();
+      if (m.material) m.material.dispose();
+    });
+  });
+  STATE.obstacles = [];
+  STATE.nextObstacleZ = -60;
+
+  // Clear particles
+  STATE.particles.forEach(p => {
+    particleGroup.remove(p.mesh);
+    p.mesh.geometry.dispose();
+    p.mesh.material.dispose();
+  });
+  STATE.particles = [];
+
+  // Clear and rebuild tunnel
+  STATE.tunnelSegments.forEach(seg => {
+    tunnelGroup.remove(seg.group);
+    seg.group.traverse(child => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    });
+  });
+  STATE.tunnelSegments = [];
+
+  camera.position.set(0, 0, 8);
+  camera.rotation.set(0, 0, 0);
+  camera.lookAt(0, 0, -50);
+
+  initTunnel();
+
+  DOM.deathScreen.classList.remove('visible');
+
+  startGame();
+}
+
+// ============================================================
+// UPDATE
+// ============================================================
+function update(dt) {
+  if (STATE.phase !== 'playing' && STATE.phase !== 'dead') return;
+
+  // --- Playing update ---
+  if (STATE.phase === 'playing') {
+    STATE.playTime += dt;
+
+    // Speed ramp
+    const speedFactor = Math.min(1, STATE.playTime / CFG.speedRampTime);
+    STATE.speed = THREE.MathUtils.lerp(CFG.baseSpeed, CFG.maxSpeed, speedFactor * speedFactor);
+
+    // Move forward
+    const moveZ = STATE.speed * dt;
+    STATE.distanceTraveled += moveZ;
+    STATE.score = Math.floor(STATE.distanceTraveled);
+
+    // Move camera and player forward (everything moves along Z)
+    camera.position.z -= moveZ;
+    playerGroup.position.z = camera.position.z - 8;
+
+    // Gravity flip
+    if (STATE.flipCooldownTimer > 0) {
+      STATE.flipCooldownTimer -= dt;
+    }
+
+    if (inputAction && !STATE.flipping && STATE.flipCooldownTimer <= 0) {
+      STATE.flipping = true;
+      STATE.flipProgress = 0;
+      STATE.flipFrom = STATE.gravityDir;
+      STATE.flipTo = -STATE.gravityDir;
+      STATE.gravityDir = STATE.flipTo;
+      STATE.cameraRollTarget += Math.PI;
+
+      playFlipSound();
+      spawnParticles(playerGroup.position.clone(), CFG.particleCountFlip, CFG.colors.particleFlip, 4, 0.5);
+    }
+    inputAction = false;
+
+    if (STATE.flipping) {
+      STATE.flipProgress += dt / CFG.flipDuration;
+      if (STATE.flipProgress >= 1) {
+        STATE.flipProgress = 1;
+        STATE.flipping = false;
+        STATE.flipCooldownTimer = CFG.flipCooldown;
+      }
+      // Smooth ease in-out
+      const t = STATE.flipProgress;
+      const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      const fromY = -STATE.flipFrom * CFG.playerWallOffset;
+      const toY = -STATE.flipTo * CFG.playerWallOffset;
+      playerGroup.position.y = THREE.MathUtils.lerp(fromY, toY, ease);
+    }
+
+    // Camera roll animation
+    STATE.cameraRoll += (STATE.cameraRollTarget - STATE.cameraRoll) * Math.min(1, dt * 8);
+    camera.rotation.z = STATE.cameraRoll;
+    camera.position.y = playerGroup.position.y * 0.3;
+
+    // Player glow pulse
+    const pulse = 0.2 + Math.sin(STATE.playTime * 6) * 0.08;
+    playerGlowMesh.material.opacity = pulse;
+    playerGlowMesh.scale.setScalar(1 + Math.sin(STATE.playTime * 4) * 0.1);
+
+    // Player light
+    STATE.playerLight.position.copy(playerGroup.position);
+
+    // Update tunnel
+    updateTunnel(camera.position.z);
+
+    // Spawn and update obstacles
+    spawnObstacles(camera.position.z);
+    updateObstacles(dt, camera.position.z);
+
+    // Collision check
+    if (checkCollisions(playerGroup.position)) {
+      die();
+    }
+
+    // Score display
+    DOM.scoreValue.textContent = STATE.score;
+
+    // Background pulse
+    updateBgPulse();
+
+    // Tunnel hue shift
+    STATE.tunnelHue = (0.65 + STATE.playTime * 0.01) % 1;
+  }
+
+  // --- Dead update ---
+  if (STATE.phase === 'dead') {
+    STATE.deathTimer += dt;
+    STATE.shakeAmount *= 0.92;
+    camera.position.x = (Math.random() - 0.5) * STATE.shakeAmount * 0.5;
+    camera.position.y += (0 - camera.position.y) * dt * 2;
+  }
+
+  // Particles always update
+  updateParticles(dt);
+}
+
+// ============================================================
+// RENDER LOOP
+// ============================================================
+function gameLoop() {
+  requestAnimationFrame(gameLoop);
+
+  const dt = Math.min(clock.getDelta(), 0.05); // cap delta
+  update(dt);
+  renderer.render(scene, camera);
+}
+
+// ============================================================
+// INIT
+// ============================================================
+function init() {
+  DOM.highScoreHudVal.textContent = STATE.highScore;
+  initThree();
+  gameLoop();
+}
+
+init();
+</script>
+</body>
+</html>
